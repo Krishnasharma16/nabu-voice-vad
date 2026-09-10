@@ -168,6 +168,8 @@ class NabuSession {
     this.lastSpeechEnergyAt = Date.now();
     this.send({type:"speech_start"});
     this.send({type:"listening"});
+    // Manual VAD mode: explicitly open the Gemini activity turn.
+    this.gemini.send(JSON.stringify({realtimeInput:{activityStart:{}}}));
     for (const c of this.prebuffer) this.sendGeminiAudio(c);
     this.prebuffer = [];
     this.prebufferSamples = 0;
@@ -214,7 +216,7 @@ class NabuSession {
     this.waitingForResponse = true;
     this.clearTimers();
     if (this.gemini?.readyState === WebSocket.OPEN && this.geminiAudioStarted) {
-      this.gemini.send(JSON.stringify({realtimeInput:{audioStreamEnd:true}}));
+      this.gemini.send(JSON.stringify({realtimeInput:{activityEnd:{}}}));
     }
     this.send({type:"thinking", reason});
   }
