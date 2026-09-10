@@ -53,6 +53,11 @@ class NabuSession {
     this.maxPrebufferSamples = 9600;
     this.geminiAudioStarted = false;
     this.lastAudioAt = 0;
+    this.lastSpeechEnergyAt = 0;
+    this.audioQueue = [];
+    this.vadLoopRunning = false;
+    this.maxAudioQueue = 24;
+    this.vadFrameCarry = Buffer.alloc(0);
   }
 
   send(o) {
@@ -159,6 +164,7 @@ class NabuSession {
     console.log("Silero: SPEECH START");
     this.turnActive = true;
     this.lastAudioAt = Date.now();
+    this.lastSpeechEnergyAt = Date.now();
     this.send({type:"speech_start"});
     this.send({type:"listening"});
     for (const c of this.prebuffer) this.sendGeminiAudio(c);
@@ -181,14 +187,15 @@ class NabuSession {
     clearTimeout(this.silenceFallbackTimer);
     this.silenceFallbackTimer = setTimeout(() => {
       if (!this.turnActive || this.waitingForResponse) return;
-      const idle = Date.now() - this.lastAudioAt;
-      if (idle >= 1800) {
-        console.log("Silence fallback -> ending turn");
+      const lastSpeech = this.lastSpeechEnergyAt || this.lastAudioAt || Date.now();
+      const silentMs = Date.now() - lastSpeech;
+      if (silentMs >= 1400) {
+        console.log(`Silence fallback -> ending turn (${silentMs} ms)`);
         this.endTurn("silence_fallback");
       } else {
         this.armSilenceFallback();
       }
-    }, 1800);
+    }, 300);
   }
 
   sendGeminiAudio(buf) {
@@ -209,33 +216,75 @@ class NabuSession {
     this.send({type:"thinking", reason});
   }
 
-  async processAudio(pcm) {
-    if (this.destroyed || !this.vad || !pcm.length) return;
-    const samples = Math.floor(pcm.length / 2);
-    this.prebuffer.push(pcm);
-    this.prebufferSamples += samples;
-    while (this.prebufferSamples > this.maxPrebufferSamples && this.prebuffer.length) {
-      const old = this.prebuffer.shift();
-      this.prebufferSamples -= Math.floor(old.length / 2);
+  // Keep WebSocket ingestion independent from Silero inference.
+  // Render Free has very little CPU, so awaiting VAD directly inside the
+  // ws message handler can make the audio stream fall behind.
+  enqueueAudio(pcm) {
+    if (this.destroyed || !pcm?.length) return;
+    if (this.audioQueue.length >= this.maxAudioQueue) {
+      this.audioQueue.shift();
+      console.warn("VAD queue full; dropping oldest audio packet");
     }
+    this.audioQueue.push(pcm);
+    if (!this.vadLoopRunning) {
+      this.processAudioQueue().catch(e => {
+        console.error("VAD queue error:", e);
+        this.send({type:"error", message:"VAD processing error"});
+      });
+    }
+  }
 
-    // Silero gets every 100 ms frame. The important fix here is that the ws
-    // handler below now correctly accepts Buffer text frames from the `ws`
-    // package, so this code actually receives the ESP32 audio.
-    await this.vad.processAudio(pcm16ToFloat32(pcm));
-
-    if (this.turnActive && !this.responseStarted && !this.waitingForResponse) {
-      this.lastAudioAt = Date.now();
-      clearTimeout(this.silenceFallbackTimer);
-      this.armSilenceFallback();
-      clearTimeout(this.endTimer);
-      this.sendGeminiAudio(pcm);
+  async processAudioQueue() {
+    if (this.vadLoopRunning) return;
+    this.vadLoopRunning = true;
+    try {
+      while (!this.destroyed && this.audioQueue.length) {
+        const pcm = this.audioQueue.shift();
+        if (!pcm?.length || !this.vad) continue;
+        const combined = this.vadFrameCarry.length
+          ? Buffer.concat([this.vadFrameCarry, pcm])
+          : pcm;
+        const frameBytes = 512 * 2;
+        let offset = 0;
+        while (offset + frameBytes <= combined.length && !this.destroyed) {
+          const frame = combined.subarray(offset, offset + frameBytes);
+          offset += frameBytes;
+          if (this.turnActive && !this.waitingForResponse) {
+            let sum = 0;
+            for (let i = 0; i < frame.length; i += 2) {
+              const x = frame.readInt16LE(i) / 32768;
+              sum += x * x;
+            }
+            const rms = Math.sqrt(sum / 512);
+            if (rms >= 0.012) this.lastSpeechEnergyAt = Date.now();
+          }
+          await this.vad.processAudio(pcm16ToFloat32(frame));
+          if (this.turnActive && !this.responseStarted && !this.waitingForResponse) {
+            clearTimeout(this.endTimer);
+            this.armSilenceFallback();
+            this.sendGeminiAudio(frame);
+          }
+        }
+        this.vadFrameCarry = offset < combined.length
+          ? Buffer.from(combined.subarray(offset))
+          : Buffer.alloc(0);
+      }
+    } finally {
+      this.vadLoopRunning = false;
+      if (!this.destroyed && this.audioQueue.length) {
+        this.processAudioQueue().catch(e => {
+          console.error("VAD queue error:", e);
+          this.send({type:"error", message:"VAD processing error"});
+        });
+      }
     }
   }
 
   async stop() {
     if (this.destroyed) return;
     this.destroyed = true;
+    this.audioQueue.length = 0;
+    this.vadFrameCarry = Buffer.alloc(0);
     this.clearTimers();
     try { await this.vad?.flush?.(); } catch {}
     try { this.vad?.destroy?.(); } catch {}
@@ -265,8 +314,8 @@ wss.on("connection", async ws => {
     }
     if (m.type === "stop") { await s.stop(); return; }
     if (m.type === "audio" && typeof m.data === "string") {
-      try { await s.processAudio(b64ToBuffer(m.data)); }
-      catch (e) { console.error("VAD error:", e); s.send({type:"error", message:"VAD processing error"}); }
+      try { s.enqueueAudio(b64ToBuffer(m.data)); }
+      catch (e) { console.error("Audio queue error:", e); s.send({type:"error", message:"Audio processing error"}); }
     }
   });
   ws.on("close", () => s.stop());

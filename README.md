@@ -1,16 +1,10 @@
-# NABU Render V3
+# NABU Smart VAD V4
 
-Realtime Silero VAD server for NABU.
+Render WebSocket voice server using Silero VAD and Gemini Live.
 
-Important V3 fix: Node `ws` text messages arrive as Buffer by default. V2 discarded those packets, so the server never processed ESP32 audio. V3 converts text Buffers to UTF-8 before JSON parsing.
-
-Build: `npm install`
-Start: `npm start`
-Health: `/health`
-WebSocket: `/live`
-
-Environment:
-- `GEMINI_API_KEY` required
-- `GEMINI_MODEL` optional
-
-VAD uses `@ericedouard/vad-node-realtime` (Silero) locally on the Render instance; no Cloudflare Smart Turn or Deepgram Flux is used.
+V4 changes:
+- Decouples WebSocket ingestion from Silero inference.
+- Feeds Silero 512-sample / 32 ms frames at 16 kHz.
+- Uses a bounded realtime queue for Render Free CPU limits.
+- Adds a 1.4 second low-energy safety end-of-turn fallback after speech starts.
+- Gemini automatic VAD remains disabled; Silero controls turn boundaries.
