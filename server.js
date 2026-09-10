@@ -42,6 +42,7 @@ class NabuSession {
     this.responseStarted = false;
     this.waitingForResponse = false;
     this.turnActive = false;
+    this.turnEnding = false;
     this.transcript = "";
     this.vad = null;
     this.endTimer = null;
@@ -176,8 +177,9 @@ class NabuSession {
   }
 
   onSpeechEnd() {
-    if (!this.turnActive || this.waitingForResponse) return;
+    if (!this.turnActive || this.waitingForResponse || this.turnEnding) return;
     console.log("Silero: SPEECH END");
+    this.turnEnding = true;
     this.send({type:"speech_end"});
     clearTimeout(this.endTimer);
     this.endTimer = setTimeout(() => this.endTurn("silero_end"), 900);
@@ -208,6 +210,7 @@ class NabuSession {
     if (!this.turnActive || this.waitingForResponse) return;
     console.log(`Ending turn: ${reason}`);
     this.turnActive = false;
+    this.turnEnding = true;
     this.waitingForResponse = true;
     this.clearTimers();
     if (this.gemini?.readyState === WebSocket.OPEN && this.geminiAudioStarted) {
@@ -259,8 +262,7 @@ class NabuSession {
             if (rms >= 0.012) this.lastSpeechEnergyAt = Date.now();
           }
           await this.vad.processAudio(pcm16ToFloat32(frame));
-          if (this.turnActive && !this.responseStarted && !this.waitingForResponse) {
-            clearTimeout(this.endTimer);
+          if (this.turnActive && !this.turnEnding && !this.responseStarted && !this.waitingForResponse) {
             this.armSilenceFallback();
             this.sendGeminiAudio(frame);
           }
