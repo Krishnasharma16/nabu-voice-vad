@@ -1,0 +1,17 @@
+{
+  "name": "nabu-render-vad",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20 <25"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "download-model": "node download-model.mjs"
+  },
+  "dependencies": {
+    "@toma.com/vad": "^0.2.0",
+    "ws": "^8.18.3"
+  }
+}
